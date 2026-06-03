@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MedAlert</title>
+  
+  <!-- React & ReactDOM (UMD) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  
+  <!-- Babel Standalone for in-browser JSX compilation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    // ── 진료과 프리셋 ────────────────────────────────────────────
+    const DEPT_PRESETS = {
+      "내과": ["type 2 diabetes mellitus","hypertension","heart failure","chronic kidney disease","pneumonia","inflammatory bowel disease","hepatitis","thyroid disorder","anemia","COPD"],
+      "외과": ["laparoscopic surgery","wound healing","hernia repair","colorectal cancer surgery","appendicitis","cholecystectomy","surgical site infection","trauma surgery"],
+      "산부인과": ["preeclampsia","gestational diabetes","cervical cancer screening","polycystic ovary syndrome","endometriosis","preterm birth","cesarean section","ovarian cancer"],
+      "소아과": ["pediatric fever","childhood asthma","respiratory syncytial virus","ADHD children","childhood obesity","neonatal sepsis","pediatric vaccination","Kawasaki disease"],
+      "정형외과": ["osteoporosis","anterior cruciate ligament","lumbar spinal stenosis","rotator cuff tear","knee osteoarthritis","fracture fixation","joint replacement","scoliosis"],
+      "신경외과": ["brain tumor surgery","spinal cord injury","intracranial aneurysm","hydrocephalus","deep brain stimulation","traumatic brain injury","disc herniation surgery","cerebral hemorrhage"],
+      "정신과": ["major depressive disorder","schizophrenia treatment","anxiety disorder","bipolar disorder","PTSD","insomnia","substance use disorder","autism spectrum disorder"],
+      "이비인후과": ["sleep apnea","allergic rhinitis","sinusitis","otitis media","tonsillitis","laryngopharyngeal reflux","thyroid nodule","anosmia","snoring","vestibular disorder"],
+      "피부과": ["atopic dermatitis","psoriasis","melanoma","acne vulgaris","urticaria","alopecia areata","skin cancer","rosacea"],
+      "안과": ["glaucoma","diabetic retinopathy","age-related macular degeneration","cataract surgery","dry eye disease","retinal detachment","myopia progression","uveitis"],
+      "영상의학과": ["CT imaging","MRI diagnosis","interventional radiology","PET-CT","ultrasound guided biopsy","breast imaging","AI radiology","contrast-enhanced imaging"],
+      "마취과": ["general anesthesia","regional anesthesia","pain management","sedation","perioperative care","airway management","epidural analgesia","postoperative nausea"],
+      "재활의학과": ["stroke rehabilitation","spinal cord rehabilitation","physical therapy","musculoskeletal rehabilitation","cardiac rehabilitation","dysphagia rehabilitation","robotic rehabilitation","chronic pain rehabilitation"],
+      "병리학과": ["histopathology","immunohistochemistry","molecular pathology","cytopathology","tumor grading","liquid biopsy pathology","digital pathology","biomarker discovery"],
+      "진단검사의학과": ["clinical laboratory","blood biomarker","PCR diagnostics","point-of-care testing","next-generation sequencing","flow cytometry","antimicrobial susceptibility","laboratory automation"],
+    };
+
+    // ── PubMed API ───────────────────────────────────────────────
+    async function fetchPubMed(keyword, max = 6) {
+      const enc = encodeURIComponent(keyword);
+      const to = new Date(), from = new Date();
+      from.setDate(to.getDate() - 120);
+      const f = d => `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}`;
+      const range = `${f(from)}:${f(to)}[PDAT]`;
+      const ids = await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${enc}+${encodeURIComponent(range)}&retmax=${max}&sort=pub+date&retmode=json`)
+        .then(r => r.json()).then(d => d.esearchresult?.idlist || []);
+      if (!ids.length) return [];
+      const result = await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${ids.join(",")}&retmode=json`)
+        .then(r => r.json()).then(d => d.result);
+      return ids.map(id => {
+        const doc = result[id] || {};
+        const au = (doc.authors||[]).slice(0,2).map(a=>a.name).join(", ");
+        return { id, title: doc.title||"", journal: doc.fulljournalname||doc.source||"", pubdate: doc.pubdate||"", authors: au + ((doc.authors||[]).length>2?" et al.":""), url:`https://pubmed.ncbi.nlm.nih.gov/${id}/`, titleKo:null, summary:null, loadingAI:false };
+      });
+    }
+
+    // ── Gemini API ───────────────────────────────────────────────
+    async function getAISummary(title, journal, apiKey) {
+      if (!apiKey) {
+        return { titleKo: "API 키 필요", summary: "설정 탭에서 Gemini API 키를 입력해주세요. Google AI Studio(aistudio.google.com)에서 무료로 발급받을 수 있습니다." };
+      }
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `의학논문 제목을 한국어로 번역하고, 임상 의사 관점에서 핵심을 2문장으로 요약해주세요.\n\n제목: "${title}"\n저널: ${journal}\n\nJSON만 반환: {"titleKo":"한국어 제목","summary":"임상 핵심 요약"}` }] }],
+            generationConfig: { temperature: 0.3, maxOutputTokens: 1000 }
+          })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
+        catch { return { titleKo: title, summary: text }; }
+      } catch (err) {
+        console.error("AI 요약 오류:", err);
+        return { titleKo: "API 오류", summary: `오류: ${err.message}` };
+      }
+    }
+
+    // ── 날짜 ────────────────────────────────────────────────────
+    function ago(s) {
+      if (!s) return "";
+      const d = new Date(s); if (isNaN(d)) return s;
+      const n = Math.floor((Date.now()-d)/86400000);
+      if (n<=0) return "오늘"; if (n<7) return `${n}일 전`;
+      if (n<30) return `${Math.floor(n/7)}주 전`; return `${Math.floor(n/30)}개월 전`;
+    }
+
+    // ════════════════════════════════════════════════════════════
+    function App() {
+      const [tab, setTab] = useState("feed");
+      const [keywords, setKeywords] = useState(["sleep apnea","allergic rhinitis"]);
+      const [input, setInput] = useState("");
+      const [papers, setPapers] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [saved, setSaved] = useState([]);
+      const [q, setQ] = useState("");
+      const [activeDept, setActiveDept] = useState("내과");
+      const [expandedId, setExpandedId] = useState(null);
+      const [updatedAt, setUpdatedAt] = useState(null);
+      const [apiKey, setApiKey] = useState(() => localStorage.getItem("medalert_gemini_key") || "");
+      const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem("medalert_gemini_key") || "");
+      const [keySaved, setKeySaved] = useState(false);
+
+      const saveApiKey = () => {
+        const k = apiKeyInput.trim();
+        setApiKey(k);
+        localStorage.setItem("medalert_gemini_key", k);
+        setKeySaved(true);
+        setTimeout(() => setKeySaved(false), 2000);
+      };
+      const clearApiKey = () => {
+        setApiKey(""); setApiKeyInput("");
+        localStorage.removeItem("medalert_gemini_key");
+      };
+
+      const load = useCallback(async () => {
+        if (!keywords.length) return;
+        setLoading(true);
+        try {
+          const res = await Promise.all(keywords.map(async kw => ({ kw, items: await fetchPubMed(kw) })));
+          setPapers(res); setUpdatedAt(new Date());
+        } finally { setLoading(false); }
+      }, [keywords]);
+
+      useEffect(() => { load(); }, [load]);
+
+      const addKw = (kw) => {
+        const t = kw.trim().toLowerCase();
+        if (!t || keywords.includes(t)) return;
+        setKeywords(p => [...p, t]); setInput("");
+      };
+      const removeKw = kw => { setKeywords(p => p.filter(k=>k!==kw)); setPapers(p=>p.filter(g=>g.kw!==kw)); };
+      const toggleSave = (paper, kw) => setSaved(p => p.find(s=>s.id===paper.id) ? p.filter(s=>s.id!==paper.id) : [...p,{...paper,kw}]);
+      const isSaved = id => saved.some(s=>s.id===id);
+
+      const handleAI = async (paperId, kw) => {
+        const update = fn => setPapers(prev => prev.map(g => ({ ...g, items: g.items.map(i => i.id===paperId ? fn(i) : i) })));
+        update(i => ({ ...i, loadingAI: true }));
+        const paper = papers.find(g=>g.kw===kw)?.items.find(i=>i.id===paperId);
+        if (!paper) return;
+        const result = await getAISummary(paper.title, paper.journal, apiKey);
+        update(i => ({ ...i, ...result, loadingAI: false }));
+        setExpandedId(paperId);
+      };
+
+      const allPapers = papers.flatMap(g => g.items.map(i => ({...i, kw: g.kw})));
+      const filtered = q ? allPapers.filter(p => p.title.toLowerCase().includes(q.toLowerCase()) || p.kw.toLowerCase().includes(q.toLowerCase())) : allPapers;
+
+      return (
+        <>
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Instrument+Sans:wght@400;500;600&display=swap');
+
+            *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+            :root {
+              --bg: #FAFAF8;
+              --white: #FFFFFF;
+              --ink: #111110;
+              --ink2: #6B6B68;
+              --ink3: #B0B0AD;
+              --line: #E8E8E5;
+              --line2: #F0F0EE;
+              --blue: #1A56DB;
+              --blue-bg: #EEF3FD;
+              --green: #0F7B5E;
+              --green-bg: #EBF7F3;
+              --amber: #92400E;
+              --amber-bg: #FEF3C7;
+            }
+
+            html, body { background: var(--bg); color: var(--ink); font-family: 'Instrument Sans', sans-serif; font-size: 15px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+
+            .wrap { max-width: 680px; margin: 0 auto; padding: 0 24px 100px; }
+
+            /* ── 헤더 ── */
+            .hd { padding: 48px 0 32px; border-bottom: 1px solid var(--line); margin-bottom: 32px; display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+            .hd-left h1 { font-family: 'Libre Baskerville', serif; font-size: 26px; font-weight: 700; letter-spacing: -0.3px; color: var(--ink); }
+            .hd-left p { font-size: 13px; color: var(--ink3); margin-top: 4px; }
+            .hd-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+            .ts { font-size: 12px; color: var(--ink3); }
+            .refresh { background: var(--ink); color: var(--bg); border: none; border-radius: 8px; padding: 8px 16px; font-family: 'Instrument Sans', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s; display: flex; align-items: center; gap: 6px; }
+            .refresh:hover { opacity: .75; }
+            .refresh:disabled { opacity: .35; cursor: not-allowed; }
+
+            /* ── 탭 ── */
+            .tabs { display: flex; gap: 0; margin-bottom: 28px; border-bottom: 1px solid var(--line); }
+            .tab { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 10px 18px 11px; font-family: 'Instrument Sans', sans-serif; font-size: 14px; font-weight: 500; color: var(--ink3); cursor: pointer; transition: color .15s, border-color .15s; }
+            .tab.on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+            .tab:hover:not(.on) { color: var(--ink2); }
+
+            /* ── 검색 ── */
+            .search-wrap { position: relative; margin-bottom: 28px; }
+            .search-wrap input { width: 100%; background: var(--white); border: 1px solid var(--line); border-radius: 8px; padding: 10px 36px 10px 14px; font-family: 'Instrument Sans', sans-serif; font-size: 14px; color: var(--ink); outline: none; transition: border-color .15s; }
+            .search-wrap input:focus { border-color: var(--ink2); }
+            .search-wrap input::placeholder { color: var(--ink3); }
+            .search-clear { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--ink3); cursor: pointer; font-size: 18px; line-height: 1; }
+
+            /* ── 논문 카드 ── */
+            .card { background: var(--white); border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px; margin-bottom: 10px; transition: border-color .2s, box-shadow .2s; animation: up .3s ease both; }
+            .card:hover { border-color: #D4D4D0; box-shadow: 0 2px 16px rgba(0,0,0,.06); }
+            @keyframes up { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+            .card-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+            .card-journal { font-size: 11px; font-weight: 600; color: var(--ink3); letter-spacing: .6px; text-transform: uppercase; }
+            .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--ink3); flex-shrink: 0; }
+            .card-date { font-size: 11px; color: var(--ink3); }
+            .card-kw { font-size: 11px; font-weight: 600; color: var(--blue); background: var(--blue-bg); border-radius: 4px; padding: 2px 7px; margin-left: auto; }
+
+            .card-title { font-size: 15px; font-weight: 500; color: var(--ink); line-height: 1.55; margin-bottom: 6px; }
+            .card-title-ko { font-size: 14px; color: var(--green); line-height: 1.55; margin-bottom: 10px; padding: 10px 14px; background: var(--green-bg); border-radius: 8px; animation: fade .25s ease; }
+            @keyframes fade { from { opacity:0; } to { opacity:1; } }
+
+            .card-authors { font-size: 12px; color: var(--ink3); margin-bottom: 14px; }
+
+            .card-summary { font-size: 13px; color: var(--ink2); line-height: 1.7; background: var(--amber-bg); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; animation: fade .25s ease; }
+            .card-summary-label { font-size: 10px; font-weight: 700; color: var(--amber); letter-spacing: .8px; text-transform: uppercase; margin-bottom: 6px; }
+
+            .card-foot { display: flex; align-items: center; gap: 8px; }
+            .btn { display: inline-flex; align-items: center; gap: 5px; border-radius: 6px; padding: 6px 12px; font-family: 'Instrument Sans', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); background: var(--white); color: var(--ink2); transition: all .15s; white-space: nowrap; }
+            .btn:hover { border-color: var(--ink3); color: var(--ink); }
+            .btn-pub { color: var(--blue); border-color: #C7D9F9; background: var(--blue-bg); text-decoration: none; }
+            .btn-pub:hover { background: #E2EBFC; }
+            .btn-ai { color: var(--amber); border-color: #F5D98A; background: var(--amber-bg); }
+            .btn-ai:hover { background: #FDE9A0; }
+            .btn-ai:disabled { opacity: .45; cursor: not-allowed; }
+            .btn-save.on { color: var(--green); border-color: #A7DDD0; background: var(--green-bg); }
+            .btn-save { margin-left: auto; }
+
+            .spin { width: 11px; height: 11px; border: 1.5px solid rgba(146,64,14,.25); border-top-color: var(--amber); border-radius: 50%; animation: rot .6s linear infinite; }
+            @keyframes rot { to { transform: rotate(360deg); } }
+
+            /* ── 섹션 헤더 ── */
+            .sec-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line2); }
+            .sec-kw { font-size: 13px; font-weight: 600; color: var(--ink); }
+            .sec-cnt { font-size: 12px; color: var(--ink3); }
+            .section { margin-bottom: 36px; }
+
+            /* ── 빈 상태 / 로딩 ── */
+            .empty { text-align: center; padding: 80px 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+            .empty-icon { font-size: 36px; opacity: .5; }
+            .empty-t { font-size: 16px; font-weight: 600; color: var(--ink); }
+            .empty-s { font-size: 13px; color: var(--ink3); line-height: 1.6; }
+            .loading-wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 80px 0; }
+            .loading-bar { width: 32px; height: 32px; border: 2px solid var(--line); border-top-color: var(--ink); border-radius: 50%; animation: rot .8s linear infinite; }
+            .loading-t { font-size: 13px; color: var(--ink3); }
+
+            /* ── 키워드 탭 ── */
+            .kw-section { margin-bottom: 36px; }
+            .sec-label { font-size: 11px; font-weight: 700; color: var(--ink3); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
+            .kw-row { display: flex; gap: 8px; margin-bottom: 14px; }
+            .kw-input { flex: 1; background: var(--white); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; font-family: 'Instrument Sans', sans-serif; font-size: 14px; color: var(--ink); outline: none; transition: border-color .15s; }
+            .kw-input:focus { border-color: var(--ink2); }
+            .kw-input::placeholder { color: var(--ink3); }
+            .kw-add { background: var(--ink); color: var(--bg); border: none; border-radius: 8px; padding: 10px 18px; font-family: 'Instrument Sans', sans-serif; font-size: 15px; font-weight: 700; cursor: pointer; transition: opacity .15s; }
+            .kw-add:hover { opacity: .75; }
+
+            .kw-tags { display: flex; flex-wrap: wrap; gap: 7px; min-height: 32px; }
+            .kw-tag { display: flex; align-items: center; gap: 5px; background: var(--white); border: 1px solid var(--line); border-radius: 20px; padding: 5px 12px; font-size: 13px; color: var(--ink); }
+            .kw-x { background: none; border: none; color: var(--ink3); cursor: pointer; font-size: 15px; line-height: 1; padding: 0; transition: color .15s; }
+            .kw-x:hover { color: #DC2626; }
+
+            .dept-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+            .dept-btn { background: var(--white); border: 1px solid var(--line); border-radius: 20px; padding: 5px 14px; font-family: 'Instrument Sans', sans-serif; font-size: 12px; font-weight: 500; color: var(--ink2); cursor: pointer; transition: all .15s; }
+            .dept-btn.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+            .dept-btn:hover:not(.on) { border-color: var(--ink3); color: var(--ink); }
+
+            .preset-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+            .preset { background: var(--bg); border: 1px solid var(--line); border-radius: 20px; padding: 5px 14px; font-family: 'Instrument Sans', sans-serif; font-size: 12px; font-weight: 500; color: var(--ink2); cursor: pointer; transition: all .15s; }
+            .preset:hover:not(.on) { border-color: var(--blue); color: var(--blue); }
+            .preset.on { background: var(--green-bg); border-color: #A7DDD0; color: var(--green); }
+
+            .load-btn { width: 100%; background: var(--ink); color: var(--bg); border: none; border-radius: 10px; padding: 14px; font-family: 'Instrument Sans', sans-serif; font-size: 14px; font-weight: 700; cursor: pointer; margin-top: 8px; transition: opacity .15s; }
+            .load-btn:hover { opacity: .8; }
+
+            /* ── 통계 ── */
+            .stats { display: flex; gap: 28px; padding: 18px 0; margin-bottom: 24px; border-bottom: 1px solid var(--line2); }
+            .stat-n { font-family: 'Libre Baskerville', serif; font-size: 22px; font-weight: 700; color: var(--ink); display: block; }
+            .stat-l { font-size: 11px; color: var(--ink3); margin-top: 2px; display: block; }
+
+            /* ── 설정 탭 ── */
+            .setting-section { margin-bottom: 32px; }
+            .setting-label { font-size: 11px; font-weight: 700; color: var(--ink3); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+            .setting-desc { font-size: 13px; color: var(--ink2); line-height: 1.6; margin-bottom: 14px; }
+            .setting-desc a { color: var(--blue); text-decoration: none; font-weight: 600; }
+            .setting-desc a:hover { text-decoration: underline; }
+            .key-row { display: flex; gap: 8px; margin-bottom: 10px; }
+            .key-input { flex: 1; background: var(--white); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; font-family: 'Instrument Sans', sans-serif; font-size: 14px; color: var(--ink); outline: none; transition: border-color .15s; }
+            .key-input:focus { border-color: var(--ink2); }
+            .key-input::placeholder { color: var(--ink3); }
+            .key-save { background: var(--ink); color: var(--bg); border: none; border-radius: 8px; padding: 10px 18px; font-family: 'Instrument Sans', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+            .key-save:hover { opacity: .75; }
+            .key-status { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 10px 14px; border-radius: 8px; }
+            .key-status.ok { background: var(--green-bg); color: var(--green); }
+            .key-status.empty { background: var(--amber-bg); color: var(--amber); }
+            .key-status .key-clear { background: none; border: none; color: var(--ink3); cursor: pointer; font-size: 12px; margin-left: auto; text-decoration: underline; }
+            .key-status .key-clear:hover { color: #DC2626; }
+            .key-saved-toast { font-size: 12px; color: var(--green); font-weight: 600; animation: fade .25s ease; }
+            .how-to { background: var(--white); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+            .how-to h3 { font-size: 14px; font-weight: 600; color: var(--ink); margin-bottom: 12px; }
+            .how-to ol { padding-left: 20px; }
+            .how-to li { font-size: 13px; color: var(--ink2); line-height: 1.8; }
+            .how-to code { background: var(--line2); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+
+            @media (max-width: 600px) {
+              .hd { flex-direction: column; align-items: flex-start; padding: 32px 0 24px; }
+              .stats { gap: 20px; }
+            }
+          `}</style>
+
+          <div className="wrap">
+            {/* 헤더 */}
+            <header className="hd">
+              <div className="hd-left">
+                <h1>MedAlert</h1>
+                <p>PubMed 최신 의학논문 · AI 번역 · 임상 요약</p>
+              </div>
+              <div className="hd-right">
+                {updatedAt && <span className="ts">{updatedAt.toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})} 업데이트</span>}
+                <button className="refresh" onClick={load} disabled={loading}>
+                  {loading ? <><div className="spin" style={{borderColor:"rgba(250,250,248,.25)",borderTopColor:"var(--bg)"}} />불러오는 중</> : "새로고침"}
+                </button>
+              </div>
+            </header>
+
+            {/* 탭 */}
+            <div className="tabs">
+              <button className={`tab ${tab==="feed"?"on":""}`} onClick={()=>setTab("feed")}>논문 피드 {allPapers.length>0&&`(${allPapers.length})`}</button>
+              <button className={`tab ${tab==="kw"?"on":""}`} onClick={()=>setTab("kw")}>키워드 ({keywords.length})</button>
+              <button className={`tab ${tab==="saved"?"on":""}`} onClick={()=>setTab("saved")}>저장됨 ({saved.length})</button>
+              <button className={`tab ${tab==="settings"?"on":""}`} onClick={()=>setTab("settings")}>설정 {!apiKey&&"⚠️"}</button>
+            </div>
+
+            {/* ══ 피드 ══ */}
+            {tab==="feed" && <>
+              {allPapers.length>0 && (
+                <div className="stats">
+                  <div><span className="stat-n">{allPapers.length}</span><span className="stat-l">논문</span></div>
+                  <div><span className="stat-n">{keywords.length}</span><span className="stat-l">키워드</span></div>
+                  <div><span className="stat-n">{allPapers.filter(p=>p.titleKo).length}</span><span className="stat-l">번역 완료</span></div>
+                  <div><span className="stat-n">{saved.length}</span><span className="stat-l">저장됨</span></div>
+                </div>
+              )}
+
+              <div className="search-wrap">
+                <input value={q} onChange={e=>setQ(e.target.value)} placeholder="제목 또는 키워드로 검색" />
+                {q && <button className="search-clear" onClick={()=>setQ("")}>×</button>}
+              </div>
+
+              {loading && !allPapers.length ? (
+                <div className="loading-wrap"><div className="loading-bar" /><div className="loading-t">PubMed에서 논문 불러오는 중…</div></div>
+              ) : !keywords.length ? (
+                <div className="empty"><div className="empty-icon">○</div><div className="empty-t">키워드를 추가해주세요</div><div className="empty-s">키워드 탭에서 관심 질환을 추가하면<br/>최신 논문을 불러옵니다.</div></div>
+              ) : q ? (
+                filtered.length===0
+                  ? <div className="empty"><div className="empty-icon">○</div><div className="empty-t">검색 결과 없음</div></div>
+                  : filtered.map(p=><Card key={p.id} p={p} kw={p.kw} saved={isSaved(p.id)} onSave={()=>toggleSave(p,p.kw)} onAI={()=>handleAI(p.id,p.kw)} expanded={expandedId===p.id} onExpand={()=>setExpandedId(expandedId===p.id?null:p.id)} />)
+              ) : (
+                papers.map(g => g.items.length>0 && (
+                  <div key={g.kw} className="section">
+                    <div className="sec-hd"><span className="sec-kw">{g.kw}</span><span className="sec-cnt">{g.items.length}편</span></div>
+                    {g.items.map(p=><Card key={p.id} p={p} kw={g.kw} saved={isSaved(p.id)} onSave={()=>toggleSave(p,g.kw)} onAI={()=>handleAI(p.id,g.kw)} expanded={expandedId===p.id} onExpand={()=>setExpandedId(expandedId===p.id?null:p.id)} />)}
+                  </div>
+                ))
+              )}
+            </>}
+
+            {/* ══ 키워드 ══ */}
+            {tab==="kw" && <>
+              <div className="kw-section">
+                <div className="sec-label">키워드 추가</div>
+                <div className="kw-row">
+                  <input className="kw-input" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addKw(input)} placeholder="예: tonsillitis, GERD, vertigo…" />
+                  <button className="kw-add" onClick={()=>addKw(input)}>+</button>
+                </div>
+                <div className="kw-tags">
+                  {keywords.length===0
+                    ? <span style={{fontSize:13,color:"var(--ink3)"}}>키워드 없음</span>
+                    : keywords.map(kw=><span key={kw} className="kw-tag">{kw}<button className="kw-x" onClick={()=>removeKw(kw)}>×</button></span>)
+                  }
+                </div>
+              </div>
+
+              <div className="kw-section">
+                <div className="sec-label">진료과별 추천</div>
+                <div className="dept-row">
+                  {Object.keys(DEPT_PRESETS).map(d=><button key={d} className={`dept-btn ${activeDept===d?"on":""}`} onClick={()=>setActiveDept(d)}>{d}</button>)}
+                </div>
+                <div className="preset-list">
+                  {(DEPT_PRESETS[activeDept]||[]).map(v=>{
+                    const on=keywords.includes(v);
+                    return <button key={v} className={`preset ${on?"on":""}`} onClick={()=>!on&&addKw(v)}>{on?"✓ ":""}{v}</button>;
+                  })}
+                </div>
+              </div>
+
+              <button className="load-btn" onClick={()=>{setTab("feed");load();}}>논문 불러오기</button>
+            </>}
+
+            {/* ══ 저장됨 ══ */}
+            {tab==="saved" && (
+              saved.length===0
+                ? <div className="empty"><div className="empty-icon">○</div><div className="empty-t">저장된 논문 없음</div><div className="empty-s">논문 카드에서 저장 버튼을 눌러보세요.</div></div>
+                : saved.map(p=><Card key={p.id} p={p} kw={p.kw} saved={true} onSave={()=>toggleSave(p,p.kw)} onAI={()=>{}} expanded={expandedId===p.id} onExpand={()=>setExpandedId(expandedId===p.id?null:p.id)} />)
+            )}
+
+            {/* ══ 설정 ══ */}
+            {tab==="settings" && <>
+              <div className="setting-section">
+                <div className="sec-label">AI 번역 · 요약 API 설정</div>
+                <div className="setting-desc">
+                  논문 제목 한국어 번역과 임상 요약 기능을 사용하려면 <strong>Google Gemini API 키</strong>가 필요합니다.<br/>
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">👉 Google AI Studio에서 무료 API 키 발급받기</a>
+                </div>
+
+                <div className="key-row">
+                  <input className="key-input" type="password" value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveApiKey()} placeholder="Gemini API 키를 입력하세요" />
+                  <button className="key-save" onClick={saveApiKey}>저장</button>
+                </div>
+
+                {keySaved && <div className="key-saved-toast">✓ API 키가 저장되었습니다</div>}
+
+                <div className={`key-status ${apiKey ? "ok" : "empty"}`}>
+                  {apiKey
+                    ? <><span>✓ API 키 등록됨 ({apiKey.slice(0,6)}…{apiKey.slice(-4)})</span><button className="key-clear" onClick={clearApiKey}>삭제</button></>
+                    : <span>⚠ API 키가 설정되지 않았습니다</span>
+                  }
+                </div>
+              </div>
+
+              <div className="setting-section">
+                <div className="how-to">
+                  <h3>🔑 API 키 발급 방법</h3>
+                  <ol>
+                    <li><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>에 접속합니다.</li>
+                    <li>Google 계정으로 로그인합니다.</li>
+                    <li><strong>"Create API Key"</strong> 버튼을 클릭합니다.</li>
+                    <li>생성된 API 키를 복사하여 위 입력란에 붙여넣기합니다.</li>
+                  </ol>
+                </div>
+              </div>
+
+              <div className="setting-section">
+                <div className="how-to">
+                  <h3>ℹ️ 참고 사항</h3>
+                  <ol>
+                    <li>Gemini API 무료 티어: 분당 15회, 하루 100만 토큰까지 무료</li>
+                    <li>API 키는 이 브라우저의 <code>localStorage</code>에만 저장됩니다.</li>
+                    <li>서버로 전송되지 않으며, 다른 사람과 공유되지 않습니다.</li>
+                  </ol>
+                </div>
+              </div>
+            </>}
+          </div>
+        </>
+      );
+    }
+
+    // ── 카드 컴포넌트 ─────────────────────────────────────────────
+    function Card({ p, kw, saved, onSave, onAI, expanded, onExpand }) {
+      const hasAI = p.titleKo || p.summary;
+      return (
+        <div className="card">
+          <div className="card-meta">
+            {p.journal && <span className="card-journal">{p.journal}</span>}
+            {p.journal && p.pubdate && <span className="dot" />}
+            {p.pubdate && <span className="card-date">{ago(p.pubdate)}</span>}
+            <span className="card-kw">{kw}</span>
+          </div>
+
+          <div className="card-title">{p.title}</div>
+
+          {p.titleKo && expanded && <div className="card-title-ko">{p.titleKo}</div>}
+          {p.authors && <div className="card-authors">{p.authors}</div>}
+          {p.summary && expanded && (
+            <div className="card-summary">
+              <div className="card-summary-label">AI 임상 요약</div>
+              {p.summary}
+            </div>
+          )}
+
+          <div className="card-foot">
+            <a className="btn btn-pub" href={p.url} target="_blank" rel="noopener noreferrer">PubMed</a>
+
+            <button className="btn btn-ai" onClick={hasAI ? onExpand : onAI} disabled={p.loadingAI}>
+              {p.loadingAI
+                ? <><div className="spin" />번역 중</>
+                : hasAI
+                  ? expanded ? "접기" : "번역 · 요약 보기"
+                  : "AI 번역 · 요약"}
+            </button>
+
+            <button className={`btn btn-save ${saved?"on":""}`} onClick={onSave}>
+              {saved ? "저장됨" : "저장"}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
