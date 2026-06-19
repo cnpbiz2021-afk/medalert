@@ -6,18 +6,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MediFed</title>
-  
+
   <!-- React & ReactDOM (UMD) -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  
+
   <!-- Babel Standalone for in-browser JSX compilation -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    // UMD(non-module) 환경이므로 JSX를 "classic" 런타임(React.createElement)으로 컴파일.
+    // 기본값인 automatic 런타임은 import 문을 주입해 SyntaxError를 일으킴.
+    Babel.registerPreset('app-react-classic', {
+      presets: [[Babel.availablePresets.react, { runtime: 'classic' }]]
+    });
+  </script>
 </head>
 <body>
   <div id="root"></div>
 
-  <script type="text/babel">
+  <script type="text/babel" data-presets="app-react-classic">
     const { useState, useEffect, useCallback } = React;
 
     // ── 진료과 프리셋 ────────────────────────────────────────────
